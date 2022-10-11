@@ -1,5 +1,6 @@
 /*
-    Test 123
+    Terraform to build What2Play Games API
+	Sean Ezell
 */
 terraform {
     backend "s3" {
@@ -10,6 +11,108 @@ terraform {
     }
 }
 
+/*
+	PERMISSION THINGS
+*/
+data "aws_caller_identity" "current_identity" {}
+
+data "aws_iam_policy_document" "policy_doc" {
+    
+    statement {
+		sid = "CreateSelfLogGroup"
+		effect = "Allow"
+		actions = [
+			"logs:CreateLogStream",
+			"logs:DescribeLogGroups",
+			"logs:DescribeLogStreams",
+			"logs:PutLogEvents",
+			"logs:GetLogEvents",
+			"logs:FilterLogEvents",
+			"logs:CreateLogDelivery",
+			"logs:GetLogDelivery",
+			"logs:UpdateLogDelivery",
+			"logs:DeleteLogDelivery",
+			"logs:ListLogDeliveries",
+			"logs:PutResourcePolicy",
+			"logs:DescribeResourcePolicies",
+			"logs:DescribeLogGroups"
+			]
+		resources = ["*"]
+    }
+
+	# statement {
+	# 	sid = "APIGWtoLambdaThatShouldNotReallyBeHere"
+	# 	effect = "Allow"
+	# 	actions = [
+	# 		"lambda:GetFunction",
+    #         "lambda:InvokeFunction"
+	# 	]
+	# 	resources = [
+	# 		"arn:aws:lambda:us-west-2:${data.aws_caller_identity.current.id}:function:*"
+	# 	]
+	# }
+}
+
+resource "aws_iam_policy" "policy" {
+    name = "what2play_games_policy"
+    path = "/" 
+    policy = data.aws_iam_policy_document.policy_doc.json
+}
+
+data "aws_iam_policy_document" "assume_role_policy" {
+    statement {
+		actions = ["sts:AssumeRole"]
+		effect = "Allow"
+		principals {
+			identifiers = ["apigateway.amazonaws.com", "lambda.amazonaws.com"]
+			type = "Service"
+		}
+	}
+}
+
+resource "aws_iam_role" "role" {
+    name = "what2play_games_role"
+    assume_role_policy = data.aws_iam_policy_document.assume_role_policy.json
+    force_detach_policies = true
+}
+
+resource "aws_iam_role_policy_attachment" "name" {
+    role = aws_iam_role.role.name
+    policy_arn = aws_iam_policy.policy.arn
+}
+
+/*
+	LAMBDA THINGS
+*/
+data "archive_file" "lambdas" {
+	for_each         = toset(var.lambdas)
+	type             = "zip"
+	source_dir      = "${path.module}/../lambda/${each.key}"
+	output_file_mode = "0666"
+	output_path      = "${path.module}/zip/${each.key}.zip"
+}
+
+resource "aws_lambda_function" "lambdas" {
+	for_each = toset(var.lambdas)
+	filename 		= "${path.module}/zip/${each.key}.zip"
+	function_name 	= each.key
+	role            = aws_iam_role.role.arn
+    handler			= "index.handler"
+	source_code_hash= filebase64sha256("${path.module}/zip/${each.key}.zip")
+	timeout			= 30
+	runtime			= "nodejs16.x"
+	publish			= true
+}
+
+resource "aws_cloudwatch_log_group" "logs" {
+	for_each = toset(var.lambdas)
+    name = "/aws/lambda/${each.key}"
+    retention_in_days = 14
+}
+
+/*
+	APIGW THINGS
+*/
 resource "aws_api_gateway_rest_api" "api" {
     name = "GamesAPI"
 	description = "Games API for What2Play"
@@ -74,13 +177,13 @@ module "apigw_endpoints" {
 	source = "./libraries/endpoints"
 
 	api_resource_id = aws_api_gateway_rest_api.api.id
-	api_parent_id = aws_api_gateway_rest_api.api.resource_id
+	api_parent_id = aws_api_gateway_rest_api.api.root_resource_id
 	api_path_part = "add"
-	api_req_models = ""
-	api_integration_uri = ""
-	api_integration_role = ""
-	api_req_templates = ""
-	api_resp_templates = ""
+	#api_req_models = ""
+	api_integration_uri = aws_lambda_function.lambdas["add-games"].invoke_arn
+	api_integration_role = aws_iam_role.role.arn
+	#api_req_templates = ""
+	#api_resp_templates = ""
 	api_validate_req_body = true
 
 }
