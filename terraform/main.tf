@@ -40,45 +40,26 @@ data "aws_iam_policy_document" "policy_doc" {
 		resources = ["*"]
     }
 
-	# statement {
-	# 	sid = "APIGWtoLambdaThatShouldNotReallyBeHere"
-	# 	effect = "Allow"
-	# 	actions = [
-	# 		"lambda:GetFunction",
-    #         "lambda:InvokeFunction"
-	# 	]
-	# 	resources = [
-	# 		"arn:aws:lambda:us-west-2:${data.aws_caller_identity.current.id}:function:*"
-	# 	]
-	# }
-}
-
-resource "aws_iam_policy" "policy" {
-    name = "what2play_games_policy"
-    path = "/" 
-    policy = data.aws_iam_policy_document.policy_doc.json
-}
-
-data "aws_iam_policy_document" "assume_role_policy" {
-    statement {
-		actions = ["sts:AssumeRole"]
+	statement {
+		sid = "APIGWtoLambdaThatShouldNotReallyBeHere"
 		effect = "Allow"
-		principals {
-			identifiers = ["apigateway.amazonaws.com", "lambda.amazonaws.com"]
-			type = "Service"
-		}
+		actions = [
+			"lambda:GetFunction",
+            "lambda:InvokeFunction"
+		]
+		resources = [
+			"arn:aws:lambda:us-west-2:${data.aws_caller_identity.current_identity.id}:function:*"
+		]
 	}
 }
 
-resource "aws_iam_role" "role" {
-    name = "what2play_games_role"
-    assume_role_policy = data.aws_iam_policy_document.assume_role_policy.json
-    force_detach_policies = true
-}
+module "iam" {
+    source = "./libraries/iam"
 
-resource "aws_iam_role_policy_attachment" "name" {
-    role = aws_iam_role.role.name
-    policy_arn = aws_iam_policy.policy.arn
+    s_policy_name = "what2play_games_policy"
+    s_role_name = "what2play_games_role"
+    s_policy = data.aws_iam_policy_document.policy_doc.json
+    s_services_list = ["apigateway.amazonaws.com", "lambda.amazonaws.com"]
 }
 
 /*
@@ -96,7 +77,7 @@ resource "aws_lambda_function" "lambdas" {
 	for_each = toset(var.lambdas)
 	filename 		= "${path.module}/zip/${each.key}.zip"
 	function_name 	= each.key
-	role            = aws_iam_role.role.arn
+	role            = module.iam.output_roleid
     handler			= "index.handler"
 	source_code_hash= filebase64sha256("${path.module}/zip/${each.key}.zip")
 	timeout			= 30
@@ -168,22 +149,78 @@ resource "aws_api_gateway_gateway_response" "apigwgw-resp-validation" {
 	}
 }
 
+resource "aws_api_gateway_usage_plan" "apigw_usage_plan" {
+	name = "what2play_gamesapi_usage_plan"
+	api_stages {
+		api_id = aws_api_gateway_rest_api.api.id
+		stage  = aws_api_gateway_stage.stage_settings.stage_name
+	}
 
-//! Finish filling this out for /add. Turn it into a for_each 
-//! Build Cognito Authorizers and add that here
-//! Is the DDB table setup? Do that here?
-//! Write some lambdas!
+	#   quota_settings {
+	#     limit  = 20
+	#     offset = 2
+	#     period = "WEEK"
+	#   }
+
+	#   throttle_settings {
+	#     burst_limit = 5
+	#     rate_limit  = 10
+	#   }
+}
+
+resource "aws_api_gateway_api_key" "apigw_api_key" {
+	name = "What2Play_GamesAPI_Key"
+}
+
+/*
+	APIGW ENDPOINTS
+*/
 module "apigw_endpoints" {
+	for_each = var.endpoints
 	source = "./libraries/endpoints"
 
-	api_resource_id = aws_api_gateway_rest_api.api.id
-	api_parent_id = aws_api_gateway_rest_api.api.root_resource_id
-	api_path_part = "add"
-	#api_req_models = ""
-	api_integration_uri = aws_lambda_function.lambdas["add-games"].invoke_arn
-	api_integration_role = aws_iam_role.role.arn
-	#api_req_templates = ""
-	#api_resp_templates = ""
-	api_validate_req_body = true
+	s_api_resource_id = aws_api_gateway_rest_api.api.id
+	s_api_parent_id = aws_api_gateway_rest_api.api.root_resource_id
+	s_api_path_part = each.key
+	s_api_req_models = { "application/json" = aws_api_gateway_model.request_models["${each.key}"].name }
+	s_api_integration_uri = aws_lambda_function.lambdas["${each.value.uri}"].invoke_arn
+	s_api_integration_role = module.iam.output_roleid
+	s_api_req_templates = { "application/json" = file("${path.module}/mapping-templates/${each.value.request_mapping}.vtl") }
+	s_api_resp_templates = each.value.response_mapping != "" ? { "application/json" = file("${path.module}/mapping-templates/${each.value.response_mapping}.vtl") } : null
+	s_api_validate_req_body = true
+}
 
+resource "aws_api_gateway_model" "request_models" {
+	for_each = var.endpoints
+	rest_api_id  = aws_api_gateway_rest_api.api.id
+	name         = "${each.key}Model"
+	description  = "request payload for ${each.key}"
+	content_type = "application/json"
+	schema = file("${path.module}/schemas/${each.value.request_schema}.json")
+}
+
+module "responses400" {
+	for_each = var.endpoints
+	source = "./libraries/responses"
+
+	depends_on = [module.apigw_endpoints]
+	s_parent_id = aws_api_gateway_rest_api.api.id
+	s_resource_id = module.apigw_endpoints["${each.key}"].output_apigw_resource_id
+	s_http_method = module.apigw_endpoints["${each.key}"].output_apigw_http_method
+	s_status_code = "400"
+	s_selection_pattern = ".*statusCode.*400.*"
+	s_integration_response_templates = { "application/json" = file("${path.module}/mapping-templates/responses-errors.vtl") }
+}
+
+module "responses500" {
+	for_each = var.endpoints
+	source = "./libraries/responses"
+
+	depends_on = [module.apigw_endpoints]
+	s_parent_id = aws_api_gateway_rest_api.api.id
+	s_resource_id = module.apigw_endpoints["${each.key}"].output_apigw_resource_id
+	s_http_method = module.apigw_endpoints["${each.key}"].output_apigw_http_method
+	s_status_code = "500"
+	s_selection_pattern = ".*statusCode.*500.*"
+	s_integration_response_templates = { "application/json" = file("${path.module}/mapping-templates/responses-errors.vtl") }
 }
