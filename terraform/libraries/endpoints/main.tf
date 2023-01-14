@@ -28,6 +28,7 @@ resource "aws_api_gateway_method" "method" {
     request_models       = var.s_api_req_models
     request_parameters   = var.s_api_req_params
     request_validator_id = aws_api_gateway_request_validator.request_validator.id
+    api_key_required = true
 }
 
 resource "aws_api_gateway_method_response" "method_response" {

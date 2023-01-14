@@ -4,9 +4,20 @@
 	"description":"Request payload for /games/add",
 	"type":"object",
 	"properties":{
-        "dumb": {
+        "game_name": {
             "type": "string",
-            "description": "stuff"
+            "description": "game name"
+		},
+		"icon_url": {
+			"type": "string",
+			"description": "url to an icon to display"
+		},
+		"description": {
+			"type": "string",
+			"description": "description of this game"
 		}
-	}
+	},
+	"required": [
+		"game_name"
+	]
 }

@@ -51,6 +51,16 @@ data "aws_iam_policy_document" "policy_doc" {
 			"arn:aws:lambda:us-west-2:${data.aws_caller_identity.current_identity.id}:function:*"
 		]
 	}
+	statement {
+		sid = "DDB"
+		effect = "Allow"
+		actions = [ 
+			"dynamodb:PutItem", 
+			"dynamodb:GetItem",  
+			"dynamodb:DeleteItem"
+		]
+		resources = ["arn:aws:dynamodb:us-west-2:${data.aws_caller_identity.current_identity.id}:table/games"]
+	}
 }
 
 module "iam" {
@@ -60,6 +70,21 @@ module "iam" {
     s_role_name = "what2play_games_role"
     s_policy = data.aws_iam_policy_document.policy_doc.json
     s_services_list = ["apigateway.amazonaws.com", "lambda.amazonaws.com"]
+}
+
+resource "aws_dynamodb_table" "games_ddb" {
+	name        	= "games"
+	billing_mode 	= "PROVISIONED"
+	read_capacity  = 5
+	write_capacity = 5
+	hash_key       = "game_name"
+	point_in_time_recovery { 
+		enabled = true 
+	}
+	attribute {
+		name = "game_name"
+		type = "S"
+	}
 }
 
 /*
@@ -75,11 +100,13 @@ data "archive_file" "lambdas" {
 
 resource "aws_lambda_function" "lambdas" {
 	for_each = toset(var.lambdas)
-	filename 		= "${path.module}/zip/${each.key}.zip"
+	#filename 		= "${path.module}/zip/${each.key}.zip"
+	filename 		= data.archive_file.lambdas["${each.key}"].output_path
 	function_name 	= each.key
 	role            = module.iam.output_roleid
     handler			= "index.handler"
-	source_code_hash= filebase64sha256("${path.module}/zip/${each.key}.zip")
+	#source_code_hash= filebase64sha256("${path.module}/zip/${each.key}.zip")
+	source_code_hash= data.archive_file.lambdas["${each.key}"].output_base64sha256
 	timeout			= 30
 	runtime			= "nodejs16.x"
 	publish			= true
@@ -108,6 +135,14 @@ resource "aws_api_gateway_deployment" "apigw_deployment" {
 	depends_on = [module.apigw_endpoints]
 	rest_api_id = aws_api_gateway_rest_api.api.id
 	description = "Deployed on ${timestamp()}"
+
+	triggers = {
+		redeployment = sha1(jsonencode([
+			module.apigw_endpoints,
+			aws_api_gateway_model.request_models
+		])),
+		redeployment = filesha1("${path.module}/schemas/add-schema.json")
+	}
 
 	lifecycle {
 		create_before_destroy = true
@@ -170,6 +205,13 @@ resource "aws_api_gateway_usage_plan" "apigw_usage_plan" {
 
 resource "aws_api_gateway_api_key" "apigw_api_key" {
 	name = "What2Play_GamesAPI_Key"
+}
+
+
+resource "aws_api_gateway_usage_plan_key" "apigw_api_key_usageplan" {
+	key_id        = aws_api_gateway_api_key.apigw_api_key.id
+	key_type      = "API_KEY"
+	usage_plan_id = aws_api_gateway_usage_plan.apigw_usage_plan.id
 }
 
 /*
